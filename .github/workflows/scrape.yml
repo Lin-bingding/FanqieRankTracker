@@ -72,7 +72,7 @@ jobs:
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
         commit_message: "[Auto] Update Fanqie daily ranks"
-        file_pattern: data/*
+        file_pattern: data api
         branch: main
 
     # ---- Deploy to GitHub Pages (inline, 绕过 GITHUB_TOKEN 不触发其他 workflow 的限制) ----

@@ -11,6 +11,7 @@ import json
 import glob
 import sys
 import argparse
+from urllib.parse import quote
 
 
 def parse_reads(reads_str: str) -> float:
@@ -218,6 +219,27 @@ def build_ai_prompt(cat_name: str, cat: dict, trend: dict) -> str:
 
 BATCH_SIZE = 3  # 每批合并的分类数
 
+MARKET_PERIODS = [("7", 7), ("14", 14), ("30", 30), ("all", None)]
+
+GENRE_GROUPS = [
+    {"name": "古风言情", "categories": ["古风世情", "古言脑洞", "宫斗宅斗", "种田"]},
+    {"name": "现代言情", "categories": ["现言脑洞", "豪门总裁", "职场婚恋", "青春甜宠"]},
+    {"name": "幻想言情", "categories": ["玄幻言情", "科幻末世", "悬疑脑洞", "女频悬疑"]},
+    {"name": "快穿衍生", "categories": ["快穿", "女频衍生"]},
+    {"name": "年代民国", "categories": ["年代", "民国言情"]},
+    {"name": "娱乐星光", "categories": ["星光璀璨"]},
+    {"name": "游戏体育", "categories": ["游戏体育"]},
+]
+
+MARKET_KEYWORDS = [
+    "重生", "穿书", "快穿", "系统", "空间", "团宠", "萌宝", "幼崽", "女配", "炮灰",
+    "反派", "权臣", "宅斗", "宫斗", "和离", "替嫁", "逃荒", "种田", "美食", "经商",
+    "年代", "七零", "八零", "军婚", "豪门", "总裁", "真假千金", "先婚后爱", "追妻",
+    "甜宠", "双洁", "强制爱", "无CP", "末世", "废土", "天灾", "囤货", "异能",
+    "国运", "星际", "修仙", "玄学", "无限流", "悬疑", "直播", "综艺", "娱乐圈",
+    "校园", "暗恋", "青梅竹马", "民国", "兽世", "远古", "基建",
+]
+
 
 def build_batch_ai_prompt(batch: list) -> str:
     """构建批量 AI 总结的 prompt。
@@ -326,6 +348,405 @@ def _save_trends_incremental(trend_path: str, date: str,
     }
     with open(trend_path, "w", encoding="utf-8") as f:
         json.dump(trend_output, f, ensure_ascii=False, indent=2)
+
+
+def api_type_filename(type_name: str) -> str:
+    """将类型名转成适合作为静态 JSON 文件名的名称。"""
+    name = (type_name or "").strip()
+    name = re.sub(r"[\\/]+", "_", name)
+    name = re.sub(r"[^\w\u4e00-\u9fff\s-]", "_", name)
+    name = re.sub(r"\s+", "_", name).strip("._")
+    return name or "unknown"
+
+
+def write_json(path: str, payload: dict):
+    """统一写 JSON，确保中文可读。"""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def build_lastest_api(output: dict, base_dir: str):
+    """生成静态 lastest 数据接口。
+
+    GitHub Pages 不支持动态 query API，因此这里将 type 参数映射为静态文件：
+    - api/lastest/all.json：全量数据
+    - api/lastest/<type>.json：单个类型数据
+    - api/lastest.json / api/lastest/index.json：类型索引
+    """
+    api_root = os.path.join(base_dir, "api")
+    lastest_dir = os.path.join(api_root, "lastest")
+    os.makedirs(lastest_dir, exist_ok=True)
+    for old_path in glob.glob(os.path.join(lastest_dir, "*.json")):
+        os.remove(old_path)
+
+    date = output.get("date", "")
+    prev_date = output.get("prev_date", "")
+    categories = output.get("categories", [])
+
+    all_payload = {
+        "type": "all",
+        "date": date,
+        "prev_date": prev_date,
+        "categories": categories,
+    }
+    write_json(os.path.join(lastest_dir, "all.json"), all_payload)
+
+    types = [{
+        "type": "all",
+        "url": "api/lastest/all.json",
+        "category_count": len(categories),
+        "book_count": sum(len(cat.get("books", [])) for cat in categories),
+    }]
+
+    used_filenames = {"all"}
+    for cat in categories:
+        type_name = cat.get("name", "")
+        filename = api_type_filename(type_name)
+        base_filename = filename
+        suffix = 2
+        while filename in used_filenames:
+            filename = f"{base_filename}_{suffix}"
+            suffix += 1
+        used_filenames.add(filename)
+
+        payload = {
+            "type": type_name,
+            "date": date,
+            "prev_date": prev_date,
+            "category": cat,
+            "categories": [cat],
+        }
+        write_json(os.path.join(lastest_dir, f"{filename}.json"), payload)
+
+        url = f"api/lastest/{quote(filename)}.json"
+        types.append({
+            "type": type_name,
+            "url": url,
+            "book_count": len(cat.get("books", [])),
+        })
+
+    index_payload = {
+        "date": date,
+        "prev_date": prev_date,
+        "types": types,
+    }
+    write_json(os.path.join(lastest_dir, "index.json"), index_payload)
+    write_json(os.path.join(api_root, "lastest.json"), index_payload)
+
+    return lastest_dir
+
+
+def parse_change(change: str) -> int:
+    """解析 '+3' / '-2' 这类排名变化。"""
+    try:
+        return int(str(change or "0").replace("+", ""))
+    except ValueError:
+        return 0
+
+
+def load_trend_rows(trends_dir: str) -> list:
+    """加载全部趋势归档，按日期升序排列。"""
+    rows = []
+    for path in sorted(glob.glob(os.path.join(trends_dir, "*.json"))):
+        try:
+            data = load_snapshot(path)
+            rows.append({
+                "date": data.get("date", ""),
+                "prev_date": data.get("prev_date", ""),
+                "trends": data.get("trends", {}),
+            })
+        except Exception as e:
+            print(f"  ⚠️  跳过趋势文件 {path}: {e}")
+    return sorted([r for r in rows if r["date"]], key=lambda x: x["date"])
+
+
+def summarize_market_rows(rows: list) -> dict:
+    """汇总某个分类在一组趋势行中的动能指标。"""
+    totals = {
+        "new_count": 0,
+        "dropped_count": 0,
+        "riser_count": 0,
+        "faller_count": 0,
+        "read_count": 0,
+        "active_days": 0,
+    }
+    for row in rows:
+        trend = row.get("trend") or {}
+        riser_count = len(trend.get("top_risers", []))
+        faller_count = len(trend.get("top_fallers", []))
+        read_count = len(trend.get("reads_growth", []))
+        totals["new_count"] += int(trend.get("new_count", 0) or 0)
+        totals["dropped_count"] += int(trend.get("dropped_count", 0) or 0)
+        totals["riser_count"] += riser_count
+        totals["faller_count"] += faller_count
+        totals["read_count"] += read_count
+        if (
+            trend.get("new_count", 0) or trend.get("dropped_count", 0)
+            or riser_count or faller_count or read_count
+        ):
+            totals["active_days"] += 1
+    return totals
+
+
+def market_score(totals: dict) -> int:
+    """计算全站热点动能分。"""
+    return round(
+        totals["new_count"] * 4 +
+        totals["dropped_count"] * 2 +
+        totals["riser_count"] * 2 +
+        totals["read_count"] * 3 +
+        totals["active_days"] * 1.5
+    )
+
+
+def collect_market_hot_types(categories: list, rows_window: list) -> list:
+    """统计具体分类热度。"""
+    result = []
+    for name in categories:
+        rows = [
+            {"trend": row.get("trends", {}).get(name)}
+            for row in rows_window
+            if row.get("trends", {}).get(name)
+        ]
+        totals = summarize_market_rows(rows)
+        score = market_score(totals)
+        if score <= 0:
+            continue
+        result.append({
+            "name": name,
+            "score": score,
+            "new_count": totals["new_count"],
+            "dropped_count": totals["dropped_count"],
+            "read_count": totals["read_count"],
+            "active_days": totals["active_days"],
+        })
+    return sorted(result, key=lambda x: x["score"], reverse=True)
+
+
+def collect_market_hot_genres(categories: list, hot_types: list) -> list:
+    """按综合赛道聚合具体分类热度。"""
+    type_map = {item["name"]: item for item in hot_types}
+    genres = []
+    for group in GENRE_GROUPS:
+        matched = []
+        for name in group["categories"]:
+            if name not in categories:
+                continue
+            matched.append(type_map.get(name, {
+                "name": name,
+                "score": 0,
+                "new_count": 0,
+                "dropped_count": 0,
+                "read_count": 0,
+                "active_days": 0,
+            }))
+        if not matched:
+            continue
+        score = sum(item["score"] for item in matched)
+        if score <= 0:
+            continue
+        lead = sorted(matched, key=lambda x: x["score"], reverse=True)[0]
+        genres.append({
+            "name": group["name"],
+            "score": score,
+            "new_count": sum(item["new_count"] for item in matched),
+            "dropped_count": sum(item["dropped_count"] for item in matched),
+            "read_count": sum(item["read_count"] for item in matched),
+            "active_days": sum(item["active_days"] for item in matched),
+            "lead_category": lead["name"],
+            "categories": [item["name"] for item in matched],
+        })
+    return sorted(genres, key=lambda x: x["score"], reverse=True)
+
+
+def add_theme_hits(score_map: dict, text: str, category_name: str, weight: int):
+    """给命中的题材关键词加权。"""
+    source = str(text or "")
+    if not source:
+        return
+    for keyword in MARKET_KEYWORDS:
+        if keyword not in source:
+            continue
+        item = score_map[keyword]
+        item["count"] += weight
+        item["categories"].add(category_name)
+
+
+def collect_market_hot_themes(output: dict, rows_window: list,
+                              categories: list) -> list:
+    """统计最新榜单和近期趋势中的高频题材词。"""
+    score_map = {
+        name: {"name": name, "count": 0, "categories": set()}
+        for name in MARKET_KEYWORDS
+    }
+
+    for cat in output.get("categories", []):
+        cat_name = cat.get("name", "")
+        for index, book in enumerate(cat.get("books", [])):
+            weight = 2 if index < 10 else 1
+            add_theme_hits(
+                score_map,
+                f"{book.get('title', '')} {book.get('intro', '')}",
+                cat_name,
+                weight
+            )
+
+    for row in rows_window:
+        for cat_name in categories:
+            trend = row.get("trends", {}).get(cat_name)
+            if not trend:
+                continue
+            add_theme_hits(
+                score_map,
+                " ".join(trend.get("new_books", [])),
+                cat_name,
+                3
+            )
+            add_theme_hits(score_map, trend.get("summary", ""), cat_name, 1)
+
+    themes = []
+    for item in score_map.values():
+        if item["count"] <= 0:
+            continue
+        themes.append({
+            "name": item["name"],
+            "count": item["count"],
+            "category_count": len(item["categories"]),
+        })
+    return sorted(
+        themes,
+        key=lambda x: (x["count"], x["category_count"]),
+        reverse=True
+    )
+
+
+def build_rule_market_summary(period_label: str, hot_genres: list,
+                              hot_types: list, hot_themes: list) -> str:
+    """基于统计结果生成全站热点兜底文案。"""
+    top_genres = "、".join(item["name"] for item in hot_genres[:2])
+    top_types = "、".join(item["name"] for item in hot_types[:3])
+    top_themes = "、".join(item["name"] for item in hot_themes[:6])
+    if not top_genres and not top_types:
+        return f"{period_label}暂无足够数据判断全站热点。"
+    return (
+        f"{period_label}里，{top_genres or top_types} 是更热的综合赛道，"
+        f"具体分类以 {top_types} 的榜单动能更强；题材上 {top_themes} "
+        f"反复出现，说明读者仍偏好强设定、强情绪钩子和明确爽点。"
+    )
+
+
+def build_market_summary_payload(output: dict, trends_dir: str) -> dict:
+    """生成全站热点统计和规则兜底总结。"""
+    categories = [cat.get("name", "") for cat in output.get("categories", [])]
+    trend_rows = load_trend_rows(trends_dir)
+    periods = {}
+
+    for key, days in MARKET_PERIODS:
+        rows_window = trend_rows if days is None else trend_rows[-days:]
+        period_label = "全部样本" if days is None else f"近 {days} 日"
+        hot_types = collect_market_hot_types(categories, rows_window)
+        hot_genres = collect_market_hot_genres(categories, hot_types)
+        hot_themes = collect_market_hot_themes(output, rows_window, categories)
+        fallback_summary = build_rule_market_summary(
+            period_label, hot_genres, hot_types, hot_themes
+        )
+        periods[key] = {
+            "period": period_label,
+            "source": "rule",
+            "summary": fallback_summary,
+            "fallback_summary": fallback_summary,
+            "hot_genres": hot_genres[:5],
+            "hot_types": hot_types[:6],
+            "hot_themes": hot_themes[:14],
+        }
+
+    return {
+        "date": output.get("date", ""),
+        "prev_date": output.get("prev_date", ""),
+        "periods": periods,
+    }
+
+
+def build_market_ai_prompt(payload: dict) -> str:
+    """构建全站热点 AI 总结 prompt。"""
+    sections = []
+    for key, data in payload.get("periods", {}).items():
+        genres = "、".join(
+            f"{item['name']}({item['score']})"
+            for item in data.get("hot_genres", [])[:5]
+        )
+        types = "、".join(
+            f"{item['name']}({item['score']})"
+            for item in data.get("hot_types", [])[:6]
+        )
+        themes = "、".join(
+            f"{item['name']}({item['count']})"
+            for item in data.get("hot_themes", [])[:10]
+        )
+        sections.append(
+            f"周期 {key} / {data['period']}:\n"
+            f"- 综合赛道: {genres or '无'}\n"
+            f"- 具体分类: {types or '无'}\n"
+            f"- 高频题材: {themes or '无'}\n"
+            f"- 规则兜底: {data['fallback_summary']}"
+        )
+
+    return f"""你是一位网文市场编辑，请根据番茄女频新书榜的统计结果，为每个周期生成一段全站热点判断。
+
+{chr(10).join(sections)}
+
+要求：
+1. 只基于给定统计，不要编造未出现的类型或题材。
+2. 每个周期输出 1 段中文，80-140 字。
+3. 点明综合赛道、具体分类、题材关键词，以及一句编辑判断。
+4. 输出严格 JSON，不要 Markdown，不要解释，格式如下：
+{{
+  "7": "总结文本",
+  "14": "总结文本",
+  "30": "总结文本",
+  "all": "总结文本"
+}}"""
+
+
+def parse_json_object(text: str) -> dict:
+    """尽量从模型响应中提取 JSON 对象。"""
+    text = (text or "").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            raise
+        return json.loads(match.group(0))
+
+
+def enrich_market_summary_with_ai(payload: dict, api_key: str,
+                                  base_url: str, model: str) -> dict:
+    """使用 AI 改写全站热点总结；失败时保留规则兜底。"""
+    try:
+        from openai import OpenAI
+    except ImportError:
+        print("⚠️  openai 库未安装，跳过全站热点 AI 总结。")
+        return payload
+
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": build_market_ai_prompt(payload)}],
+            max_tokens=900,
+            temperature=0.5,
+        )
+        parsed = parse_json_object(response.choices[0].message.content)
+        for key, summary in parsed.items():
+            if key in payload["periods"] and isinstance(summary, str) and summary.strip():
+                payload["periods"][key]["summary"] = summary.strip()
+                payload["periods"][key]["source"] = "ai"
+        print("✅ 全站热点 AI 总结已生成")
+    except Exception as e:
+        print(f"⚠️  全站热点 AI 总结失败，使用规则兜底: {e}")
+
+    return payload
 
 
 
@@ -641,6 +1062,10 @@ def main():
         json.dump(output, f, ensure_ascii=False, indent=2)
     print(f"\n✅ 已生成: {out_path}")
 
+    # 生成静态 API 文件：api/lastest/all.json + api/lastest/<type>.json
+    api_dir = build_lastest_api(output, base_dir)
+    print(f"✅ Lastest API: {api_dir}")
+
     # 写入 trends/YYYY-MM-DD.json
     trend_output = {
         "date": latest_data["date"],
@@ -650,6 +1075,16 @@ def main():
     with open(trend_path, "w", encoding="utf-8") as f:
         json.dump(trend_output, f, ensure_ascii=False, indent=2)
     print(f"✅ 趋势存档: {trend_path}")
+
+    # 生成全站热点总结：AI 优先，规则文案兜底
+    market_payload = build_market_summary_payload(output, trends_dir)
+    if api_base_url and api_key and api_model:
+        market_payload = enrich_market_summary_with_ai(
+            market_payload, api_key, api_base_url, api_model
+        )
+    market_path = os.path.join(data_dir, "market_summary.json")
+    write_json(market_path, market_payload)
+    print(f"✅ 全站热点总结: {market_path}")
 
     # 生成 dates.json 索引（供前端历史日期选择器使用）
     date_list = []

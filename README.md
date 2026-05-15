@@ -13,8 +13,10 @@
 | 🕷️ 自动爬取 | 每日定时抓取番茄女性频道各个分类的新书榜 Top 30 |
 | 📊 趋势对比 | 自动对比相邻两天数据：新上榜 / 掉榜 / 排名变化 / 阅读量增长 |
 | 🤖 AI 风向分析 | 接入 OpenAI 兼容 API，按分类生成市场趋势速评 |
+| 🧭 类型风向标 | 独立趋势页聚合多日数据，用 AI 总结古风言情等综合赛道、具体热门分类和高频题材；未配置 API 时自动规则兜底 |
 | 🖥️ 精美看板 | 暗色编辑风格仪表盘，带打字机动画和瀑布流书籍卡片 |
 | 📱 移动适配 | 完整的移动端适配，侧边栏抽屉式菜单 |
+| 🔌 数据接口 | 生成静态 `lastest` JSON 接口，可按类型读取最新数据 |
 | ⚡ 全自动化 | GitHub Actions + GitHub Pages，零服务器运维 |
 
 ---
@@ -65,6 +67,27 @@
 
 GitHub Actions 已配置为 **每天 UTC 00:00（北京时间 08:00）** 自动运行。之后无需任何手动操作，数据和看板会每天自动更新。
 
+看板右上角的 **风向标** 可进入 `trend.html`，先查看当下火热综合赛道（如古风言情）、具体热门分类和高频题材，再按具体类型查看近 7 / 14 / 30 日或全部周期的趋势分析。全站热点会优先使用 AI 总结，未配置 API 或生成失败时使用规则统计文案兜底。
+
+---
+
+## 🔌 最新数据接口
+
+构建脚本会同步生成 GitHub Pages 可直接访问的静态 JSON 接口：
+
+| 类型 | 路径 | 说明 |
+|---|---|---|
+| 类型索引 | `api/lastest.json` | 返回所有可用类型及对应 URL |
+| 全量数据 | `api/lastest/all.json` | `type=all`，返回全部分类、趋势和书籍 |
+| 单类型数据 | `api/lastest/<类型>.json` | 返回指定类型的数据，例如 `api/lastest/古风世情.json` |
+
+示例：
+
+```bash
+curl https://<你的用户名>.github.io/FanqieRankTracker/api/lastest/all.json
+curl https://<你的用户名>.github.io/FanqieRankTracker/api/lastest/古风世情.json
+```
+
 ---
 
 ## 🔧 本地开发
@@ -114,9 +137,13 @@ FanqieRankTracker/
 ├── data/
 │   ├── fanqie_female_new_ranks_YYYYMMDD.json  # 每日原始快照
 │   ├── latest_ranks.json       # 最新聚合数据（看板数据源）
+│   ├── market_summary.json     # 全站热点 AI/规则总结
 │   └── trends/
 │       └── YYYY-MM-DD.json     # 趋势归档
+├── api/
+│   └── lastest/                # 最新数据静态接口（all + 按类型拆分）
 ├── index.html                  # 仪表盘入口页
+├── trend.html                  # 类型风向标趋势分析页
 ├── scrape_fanqie_ranks.py      # 番茄小说爬虫（Playwright）
 ├── requirements.txt            # Python 依赖
 └── README.md                   # 本文件
