@@ -69,7 +69,7 @@ jobs:
         API_MODEL: ${{ secrets.API_MODEL }}
 
     - name: Commit and Push Changes
-      uses: stefanzweifel/git-auto-commit-action@v5
+      uses: stefanzweifel/git-auto-commit-action@v5.0.1
       with:
         commit_message: "[Auto] Update Fanqie daily ranks"
         file_pattern: data api
